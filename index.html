@@ -294,15 +294,18 @@ function renderPublicTypes(){
 }
 
 // ── DISPONIBILIDADE (90 dias para frente) ─────────────────────────────────────
+var _loadSeq = 0, _loading = false;
 async function loadAvailability(){
+  var seq = ++_loadSeq;   // cada carga tem um id; resultados de cargas antigas são descartados
+  _loading = true;
   document.getElementById('cal-wrap').innerHTML = '<div class="loading">⏳ Verificando disponibilidade...</div>';
   hideEl('tw');
   selDate = ''; selTime = '';
   document.getElementById('btn1').disabled = true;
-  availDays = {};
+  var found = {};
 
   var mt = cfg.meetingTypes.find(function(x){return x.id === selTypeId;});
-  if(!mt){renderCal();return;}
+  if(!mt){_loading = false; availDays = {}; renderCal();return;}
 
   var slaHours = (cfg.system && cfg.system.slaHours !== undefined) ? cfg.system.slaHours : 48;
   var wv = (cfg.system && cfg.system.webhookVerificar) || WV;
@@ -311,26 +314,40 @@ async function loadAvailability(){
   today.setHours(0,0,0,0);
 
   // 60 dias para frente
+  var jobs = [];
   for(var i = 1; i <= 60; i++){
     var d = new Date(today);
     d.setDate(d.getDate() + i);
     var dow = d.getDay();
     var iso = d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
     var daySlots = (mt.slots || []).filter(function(s){return s.day === dow;});
-    if(!daySlots.length) continue;
+    if(daySlots.length) jobs.push({iso: iso, slots: daySlots});
+  }
+
+  async function check(job){
     try{
       var r = await fetch(wv, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({date: iso, slots: daySlots, duration: mt.duration, slaHours: slaHours, meetingType: mt.name})
+        body: JSON.stringify({date: job.iso, slots: job.slots, duration: mt.duration, slaHours: slaHours, meetingType: mt.name})
       });
       if(r.ok){
         var resp = await r.json();
         if(resp.slots && resp.slots.length)
-          availDays[iso] = resp.slots.map(function(s){return s.time;});
+          found[job.iso] = resp.slots.map(function(s){return s.time;});
       }
-    }catch(e){console.error('Erro verificação', iso, e);}
+    }catch(e){console.error('Erro verificação', job.iso, e);}
   }
+
+  // consulta em lotes paralelos (mais rápido que um dia por vez)
+  var BATCH = 6;
+  for(var b = 0; b < jobs.length; b += BATCH){
+    await Promise.all(jobs.slice(b, b + BATCH).map(check));
+    if(seq !== _loadSeq) return; // uma carga mais nova começou
+  }
+  if(seq !== _loadSeq) return;
+  availDays = found;
+  _loading = false;
   renderCal();
 }
 
@@ -352,6 +369,11 @@ function renderCal(){
   var atMax = (cy === maxM.y && cm === maxM.m) || (cy > maxM.y) || (cy === maxM.y && cm > maxM.m);
   document.getElementById('prev-m').disabled = atMin;
   document.getElementById('next-m').disabled = atMax;
+
+  if(_loading){
+    document.getElementById('cal-wrap').innerHTML = '<div class="loading">⏳ Verificando disponibilidade...</div>';
+    return;
+  }
 
   var first = new Date(cy, cm, 1).getDay();
   var days  = new Date(cy, cm+1, 0).getDate();
@@ -452,7 +474,7 @@ async function confirmar(){
       : "<div style='margin-top:10px;font-size:12px;color:#6b7280'>O link do Meet será enviado por e-mail.</div>";
     document.getElementById('sd').innerHTML =
       '<div style="margin-bottom:4px"><strong>' + escH(selTypeName) + '</strong> com <strong>' + escH(cfg.csm.name || 'Alini') + '</strong></div>'
-      + '<div style="color:#6b7280">📅 ' + DL[dt.getDay()] + ', ' + dt.getDate() + ' de ' + MONTHS[dt.getMonth()] + ' de ' + cy + '</div>'
+      + '<div style="color:#6b7280">📅 ' + DL[dt.getDay()] + ', ' + dt.getDate() + ' de ' + MONTHS[dt.getMonth()] + ' de ' + dt.getFullYear() + '</div>'
       + '<div style="color:#6b7280">🕐 ' + selTime + ' – ' + addMin(selTime, selTypeDur) + ' <strong style="color:#854d0e">· Horário de Brasília (GMT-3)</strong></div>'
       + meetEl;
     var cb = document.getElementById('copy-btn');
@@ -485,7 +507,7 @@ document.addEventListener('DOMContentLoaded', async function(){
     if(this.disabled) return;
     showPub('s2');
     var dt = new Date(selDate + 'T12:00:00');
-    document.getElementById('ibar').textContent = '📅 ' + DL[dt.getDay()] + ', ' + dt.getDate() + ' de ' + MONTHS[dt.getMonth()] + ' de ' + cy + ' às ' + selTime + ' · ' + selTypeName + ' (Horário de Brasília)';
+    document.getElementById('ibar').textContent = '📅 ' + DL[dt.getDay()] + ', ' + dt.getDate() + ' de ' + MONTHS[dt.getMonth()] + ' de ' + dt.getFullYear() + ' às ' + selTime + ' · ' + selTypeName + ' (Horário de Brasília)';
   });
   document.getElementById('btn2').addEventListener('click', confirmar);
   document.getElementById('back2').addEventListener('click', function(){showPub('s1');});
@@ -496,11 +518,11 @@ document.addEventListener('DOMContentLoaded', async function(){
     // nunca recua antes do mês atual
     var nowY2 = new Date().getFullYear(), nowM2 = new Date().getMonth();
     if(cy < nowY2 || (cy === nowY2 && cm < nowM2)){ cy = nowY2; cm = nowM2; }
-    availDays = {}; loadAvailability();
+    renderCal();
   });
   document.getElementById('next-m').addEventListener('click', function(){
     if(this.disabled) return;
-    cm++; if(cm > 11){cm = 0; cy++;} availDays = {}; loadAvailability();
+    cm++; if(cm > 11){cm = 0; cy++;} renderCal();
   });
   document.getElementById('succ-btn').addEventListener('click', function(){location.reload();});
 });
